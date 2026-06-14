@@ -181,7 +181,62 @@ This is the key table — **every external user, classified by outcome**:
 
 ---
 
-## 6. One-line summary for the deck
+## 6. Summary at a glance
+
+The same outcomes, simplified to the three groups that matter:
+
+| Outcome | % of users |
+|---------|-----------|
+| ✅ Got an X1 manager | 16% |
+| ❌ No Salesforce contact at all | **72% ← the big one** |
+| ❌ Other reasons (account missing, ambiguous email, no SAP id, invalid X1) | 12% |
+| **Total** | **100%** |
+
+And what that means for the model — the train / predict split:
+
+| Group | Count | % of external users | What happens |
+|-------|------:|--------------------:|--------------|
+| ✅ Labeled (Phase 1 found their X1) | 783 | 16.1% | used to **train** the model |
+| 🎯 Unlabeled (no X1 found) | 4,071 | 83.9% | this is what we **predict** on |
+| **Total external users** | **4,854** | **100%** | |
+
+---
+
+## 7. Conclusion (for management)
+
+The deterministic mapping (Chemille → SFDC Contact → SFDC Account → SAP), applied
+with three data-quality controls, conclusively assigns an **X1 Account Manager to
+783 of the 4,854 external Chemille users (16.1%)**. These 783 records are
+**confirmed, fully traceable, and serve as the training data** for the Phase-2
+prediction model.
+
+The model’s task is therefore to predict X1 for the remaining **4,071 users
+(≈84%)** that the joins could not resolve.
+
+**A note on the denominator.** All percentages are measured against the **4,854
+external users**, not the 6,301 raw rows. The **1,447 internal `@celanese.com`
+employees are out of scope** for the entire exercise (they are not customers) and
+are therefore neither trained on nor predicted.
+
+**Framing of the approach.**
+- **Train on:** 783 users — the 16% whose X1 we know with certainty.
+- **Predict on:** 4,071 users — the 84% whose X1 is unknown.
+
+This is the standard supervised-learning setup: a smaller, verified set teaches
+the model to fill in the larger unknown set.
+
+**Known constraint.** The 783 training examples are spread across **193 distinct
+managers (~4 examples each)**, which is thin for predicting 4,071 users across a
+potentially even larger set of managers. Phase 2 therefore relies primarily on
+**`email_domain`** — the strongest available predictor (association 0.69 with X1)
+— and may need to predict a **coarser target** (e.g. region or segment) and/or
+**recover additional labels** by improving the email-match rate. The single
+highest-impact improvement remains closing the **72% "no Salesforce contact"
+gap**, which is a data-availability issue, not a limitation of the pipeline.
+
+---
+
+## 8. One-line summary for the deck
 
 > From **4,854 external Chemille users**, deterministic joins (Chemille → SFDC
 > Contact → SFDC Account → SAP) plus three data-quality controls produce

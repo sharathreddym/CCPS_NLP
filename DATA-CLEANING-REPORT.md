@@ -236,7 +236,77 @@ gap**, which is a data-availability issue, not a limitation of the pipeline.
 
 ---
 
-## 8. One-line summary for the deck
+## 8. Phase-2 approaches — predicting X1 for the 4,071 unmapped users
+
+We use the **783 labeled users as training data** to predict the X1 manager for
+the **4,071 unlabeled users**. This is a supervised classification problem.
+
+### 8.1 Inputs (features) — what we are allowed to use
+
+The model may only use attributes that exist for **every** user, including the
+unlabeled ones. The unlabeled users only have their **Chemille fields**, so the
+valid inputs are:
+
+| Input feature | Source | Association with X1 (Cramér's V) |
+|---------------|--------|---------------------------------:|
+| `email_domain` (e.g. `biesterfeld.com`) | derived from Chemille `Email` | **0.69 (strongest)** |
+| `country` | Chemille | 0.53 |
+| `company` (free text) | Chemille | 0.50 |
+
+> **Not allowed as inputs (data leakage):** `account_region`, `account_industry`,
+> `account_type`, `sap_salesorg`, SAP id, account id. These come from the SFDC/SAP
+> join and only exist *after* a user is matched — they are unknown for the 4,071
+> unlabeled users, so they cannot be used to predict them. (They are useful for
+> *understanding* the data, e.g. region drives X1 at 0.86, but not as inputs.)
+
+### 8.2 Outputs (what we can predict) — two options
+
+| Option | Prediction target | Classes | Pros / Cons |
+|--------|--------------------|--------:|-------------|
+| **A. Direct** | the individual **X1 manager** | 193 | Exactly what the business wants, but hard: ~4 training examples per manager. |
+| **B. Coarser (hierarchical)** | a **group** first — e.g. `region` / `sales segment` / company cluster — then resolve the manager within it | few | Far easier to learn (more examples per class); still useful; the individual manager can often be derived from the group + company. |
+
+Recommendation: try **A** first as the goal, but fall back to **B** where A is
+too uncertain (the 193-manager sparsity makes B a realistic safety net).
+
+### 8.3 Modeling approaches (simple → advanced)
+
+| # | Approach | How it works | Best for |
+|---|----------|--------------|----------|
+| 1 | **Domain lookup (rule-based)** | from the 783 labels build `email_domain → X1` (majority vote); apply to any unlabeled user sharing that domain | High-precision quick win. Justified by the 0.69 association — everyone at a domain usually shares one manager. |
+| 2 | **Nearest-neighbour / similarity** | for an unlabeled user, find the most similar labeled user by `company` text + `domain` (TF-IDF or embeddings) and borrow their X1 | Handles the long tail (works even for managers with 1 example); the similarity score becomes a **confidence** value. |
+| 3 | **Multiclass classifier** | Logistic Regression / Random Forest / Gradient Boosting on one-hot `domain` + `country` + TF-IDF `company` | A trainable baseline; weaker where classes have very few examples. |
+| 4 | **Embedding / LLM semantic match** | embed company name + domain, match to the nearest labeled company cluster | Best for messy/duplicate company names (`Acme Inc` vs `ACME Incorporated`). |
+
+### 8.4 Recommended pipeline (tiered, with human-in-the-loop)
+
+1. **Tier 1 — domain lookup** (approach 1): assign high-confidence predictions
+   where the domain is already known from the 783 labels.
+2. **Tier 2 — similarity model** (approach 2): for the rest, predict from the
+   closest labeled company/domain; the similarity score = confidence.
+3. **Confidence threshold + human review:** auto-accept high-confidence
+   predictions; route low-confidence ones to a person. Because the output feeds
+   **account-manager incentives**, a wrong-but-confident prediction is costly —
+   so thresholding matters more than raw accuracy.
+
+### 8.5 How we will measure success
+
+Hold out part of the **783 known users** as a test set, predict their X1, and
+report **accuracy** and **per-class coverage**. This tells us how far we can trust
+the model before applying it to the 4,071 unknowns.
+
+### 8.6 Summary
+
+- **Train on:** 783 labeled users (the 16% we know).
+- **Predict on:** 4,071 unlabeled users (the 84% we don't).
+- **Inputs:** `email_domain`, `country`, `company` (Chemille fields only).
+- **Output:** the X1 manager (or a coarser region/segment, then resolve).
+- **Constraint:** ~4 examples per manager → lean on `email_domain`, use
+  confidence thresholds, and recover more labels by closing the 72% gap.
+
+---
+
+## 9. One-line summary for the deck
 
 > From **4,854 external Chemille users**, deterministic joins (Chemille → SFDC
 > Contact → SFDC Account → SAP) plus three data-quality controls produce

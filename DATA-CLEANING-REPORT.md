@@ -202,7 +202,7 @@ And what that means for the model — the train / predict split:
 
 ---
 
-## 7. Conclusion (for management)
+## 7. Conclusion
 
 The deterministic mapping (Chemille → SFDC Contact → SFDC Account → SAP), applied
 with three data-quality controls, conclusively assigns an **X1 Account Manager to

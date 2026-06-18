@@ -1,248 +1,354 @@
-# Data Transformation — Step by Step (Phase 1: 783 labels, then Enrichment: +727)
+# Data Transformation — FULLY DETAILED, Step by Step
 
-This document explains, with **real examples from the data**, exactly how we go
-from raw files to:
-- **Phase 1** → 783 confirmed X1 labels, and
-- **Enrichment (Phase 1b)** → 727 additional X1 labels.
-
-## Terminology used in this document (to avoid confusion)
-
-| Term | Means | File |
-|------|-------|------|
-| **Chemille User file** | the portal users (external customers) we want to map | `Chemille-User-Data.csv` |
-| **SFDC Contacts file** | individual **people** in Salesforce (CRM contacts) | `SFDC-Contact-Data.csv` |
-| **SFDC Accounts file** | **companies** in Salesforce (the customers) | `SFDC-Accounts-Data.csv` |
-| **SAP Data file** | SAP customers + their X1 account manager | `SAP-Data.csv` |
-| **email domain** | the part of an email **after the `@`** (e.g. `biesterfeld.com`). NOT a website. | derived from an email address |
-| **X1** | the account manager we are trying to find | lives in the SAP Data file |
-
-> Whenever this document says "contact" it means a row in the **SFDC Contacts
-> file** (a Salesforce person) — never a Chemille user. Whenever it says
-> "domain" it means **email domain** (text after `@`).
+Every micro-step, the **exact file**, the **exact column(s)**, the **operation**,
+and a **real before→after example** from the data. Covers:
+- **Phase 1** → 783 confirmed X1 labels
+- **Enrichment (Phase 1b)** → 727 additional X1 labels
 
 ---
 
-# PART A — PHASE 1: getting the 783 labels
+## Naming rules used everywhere in this document
 
-**Idea:** match a Chemille user to a Salesforce **person** by their *exact email*,
-then walk that person → their company → SAP → the X1 manager.
+| Word used | Exact meaning | File on disk |
+|-----------|---------------|--------------|
+| **Chemille User file** | external portal customers we want to map | `Chemille-User-Data.csv` |
+| **SFDC Contacts file** | individual **people** in Salesforce | `SFDC-Contact-Data.csv` |
+| **SFDC Accounts file** | **companies** in Salesforce | `SFDC-Accounts-Data.csv` |
+| **SAP Data file** | SAP customers + the **X1** manager | `SAP-Data.csv` |
+| **email domain** | text **after the `@`** in an email (e.g. `ergotech.it`). NOT a website. | computed |
+| **X1** | the account-manager name we want | column `X1` in the SAP Data file |
 
-## The chain (4 files, 3 joins)
+- "**contact**" always = a row in the **SFDC Contacts file** (never a Chemille user).
+- "**domain**" always = **email domain** (text after `@`).
+
+### The exact columns each file starts with (the ones we use)
+
+| File | Columns we read |
+|------|-----------------|
+| `Chemille-User-Data.csv` | `Email`, `firstName`, `lastName`, `country`, `company` |
+| `SFDC-Contact-Data.csv` | `Email`, `AccountId` (2 of its 119 columns) |
+| `SFDC-Accounts-Data.csv` | `Id`, `SAP_Customer_Master_ID__c`, `Name` (+region/industry for analysis) |
+| `SAP-Data.csv` | `SAP Customer ID`, `X1` (+X3/X4/X9) |
+
+---
+
+# PART A — PHASE 1 (783 labels): match by EXACT email
+
+High-level chain (4 files, 3 joins):
 
 ```
-Chemille User file   .Email
-        │  JOIN 1: exact email match
-        ▼
-SFDC Contacts file   .Email  →  gives .AccountId
-        │  JOIN 2: AccountId = Id
-        ▼
-SFDC Accounts file   .Id     →  gives .SAP_Customer_Master_ID__c
-        │  JOIN 3: SAP id match
-        ▼
-SAP Data file        .[SAP Customer ID]  →  gives .X1
+Chemille User file.Email  ──exact email──►  SFDC Contacts file.Email
+SFDC Contacts file.AccountId  ──equals──►  SFDC Accounts file.Id
+SFDC Accounts file.SAP_Customer_Master_ID__c  ──equals──►  SAP Data file.[SAP Customer ID]
+SAP Data file.X1  ──►  the answer
 ```
 
 ---
 
-## Step A1 — Clean the Chemille User file
+## STEP A1 — Clean the **Chemille User file**
 
-**File:** `Chemille-User-Data.csv` (6,301 rows)
+**File:** `Chemille-User-Data.csv` · **Start: 6,301 rows.**
 
-Operations:
-1. Normalize the `Email`: trim spaces, lowercase, strip a leading `*`.
-2. Remove rows with a blank email.
-3. Compute the **email domain** (text after `@`).
-4. **Remove internal users** whose email domain is `celanese.com` (employees, not customers).
-5. Keep one row per email (deduplicate).
-
-Example of a removed internal user:
+Raw sample (exact columns as they appear):
 ```
-michael.hess@celanese.com   → email domain = celanese.com → REMOVED (internal)
+Email                         firstName  lastName        country        company
+10356602@mackenzista.com.br   Bruna      Uemura Rucker   Brazil         Universidade Presbiteriana Mackenzie
+1050746661@iran.ir            Ali        Bolouki         Iran           Khorasan Powder Metallurgy
+115295@global.ul.com          Jacob      Farny           United States  Bumbleroot Farms Inc
 ```
 
-**Result: 4,854 distinct external Chemille users.**
+**A1.1 — Normalize column `Email`.** Operation: trim spaces → lowercase → strip a
+leading `*`. (In this file no emails had uppercase, so most are unchanged; the
+rule still runs to be safe.) Creates a working column `email`.
+
+**A1.2 — Drop rows where `email` is blank.** (No possible match without an email.)
+
+**A1.3 — Compute `email_domain`** = the part of `email` after `@`.
+```
+email = 1050746661@iran.ir   →   email_domain = iran.ir
+```
+
+**A1.4 — Remove internal Celanese users** where `email_domain` == `celanese.com`.
+Real removed example:
+```
+michael.hess@celanese.com   →   email_domain = celanese.com   →   REMOVED (employee, not a customer)
+```
+Removes **1,447** rows.
+
+**A1.5 — Deduplicate** to one row per `email`.
+
+> **Output of A1: 4,854 distinct external Chemille users.**
 
 ---
 
-## Step A2 — Clean the SFDC Contacts file and apply DQ #1
+## STEP A2 — Clean the **SFDC Contacts file** + Data-Quality Control #1
 
-**File:** `SFDC-Contact-Data.csv` (145,870 rows). We use only two columns:
-`Email` and `AccountId`.
+**File:** `SFDC-Contact-Data.csv` · **Start: 145,870 rows.** Columns used:
+`Email`, `AccountId`.
 
-Operations:
-1. Normalize the contact `Email` (same rule as above). Example fix:
-   ```
-   *david.price@selecteng.ca   →   david.price@selecteng.ca
-   ```
-2. Drop rows with blank `Email` or blank `AccountId`.
-3. **DQ #1 — remove ambiguous emails.** If one email is linked to **more than
-   one** `AccountId`, it cannot identify a single company, so we drop **all** of
-   its rows. Real examples (each email points to 2 different Salesforce accounts):
-   ```
-   mariana.brito@arlington-automotive.com  → AccountIds 0016S00003ME3DjQAL  AND  001i000000Zv5ogAAB   → dropped
-   sam.craig@convatec.com                  → AccountIds 0016S00002xhwz3QAA  AND  001i000000swmn2AAA   → dropped
-   klawson@fitfibers.com                   → AccountIds 001i000000Zv4yeAAB  AND  001i000000swlvAAAQ   → dropped
-   ```
-4. Keep one row per email.
+**A2.1 — Normalize column `Email`** (same rule). This strips Salesforce
+"bounce-marker" `*` prefixes. Real before→after:
+```
+*david.price@selecteng.ca               →   david.price@selecteng.ca
+*jeffrey.theisen@gcpaint.com            →   jeffrey.theisen@gcpaint.com
+*kathleen.cerchio@quantum-polymers.com  →   kathleen.cerchio@quantum-polymers.com
+```
 
-**Result: a clean lookup of `email → AccountId` (134,202 rows).**
+**A2.2 — Normalize column `AccountId`** (trim spaces only; these 18-character IDs
+are case-sensitive so we do NOT lowercase them).
 
----
+**A2.3 — Drop rows** where `Email` or `AccountId` is blank. (Removes 2 rows.)
 
-## Step A3 — Clean the SFDC Accounts file
+**A2.4 — DATA-QUALITY CONTROL #1: remove ambiguous emails.**
+Operation: group by `email`, count the number of **distinct** `AccountId`s.
+If an email maps to **more than one** account, it cannot identify a single
+company, so we drop **every** row for that email. Real examples (each maps to 2
+different Salesforce accounts):
+```
+mariana.brito@arlington-automotive.com  →  AccountId 0016S00003ME3DjQAL  AND  001i000000Zv5ogAAB  →  DROP all
+sam.craig@convatec.com                  →  AccountId 0016S00002xhwz3QAA  AND  001i000000swmn2AAA  →  DROP all
+klawson@fitfibers.com                   →  AccountId 001i000000Zv4yeAAB  AND  001i000000swlvAAAQ  →  DROP all
+```
+This removes **8,884 rows** (covering **4,122 distinct emails**).
 
-**File:** `SFDC-Accounts-Data.csv` (104,764 rows). Key columns: `Id` and
-`SAP_Customer_Master_ID__c`.
+**A2.5 — Deduplicate** to one row per `email`.
 
-Operations:
-1. Normalize `Id` (trim only — these 18-char IDs are case-sensitive).
-2. Normalize `SAP_Customer_Master_ID__c`: trim, drop a trailing `.0`, strip
-   leading zeros (so it matches the SAP side). Illustrative:
-   ```
-   0009201520   →   9201520
-   ```
-3. Keep one row per `Id`.
-
-**Result: a clean lookup of `AccountId → SAP Customer ID`.**
+> **Output of A2: a clean lookup table `email → AccountId` (134,202 rows).**
 
 ---
 
-## Step A4 — Clean the SAP Data file and apply DQ #2
+## STEP A3 — Clean the **SFDC Accounts file**
 
-**File:** `SAP-Data.csv` (82,969 rows). Key columns: `SAP Customer ID` and `X1`.
+**File:** `SFDC-Accounts-Data.csv` · **Start: 104,764 rows.** Columns used:
+`Id`, `SAP_Customer_Master_ID__c`, `Name`.
 
-Operations:
-1. Normalize `SAP Customer ID` (same rule as the SAP id above).
-2. **DQ #2 — remove invalid/system X1 values.** The `X1` column is free text and
-   sometimes holds a status instead of a person's name. We drop these (real
-   counts from the data):
-   ```
-   Not assigned                       → 5,953 rows   REMOVED
-   TRANSFERRED TO EU CHANNEL PARTNER  → 3,015 rows   REMOVED
-   UNASSIGNED ACCOUNT REP             → 1,877 rows   REMOVED
-   TRANSFERRED TO US CHANNEL PARTNER  → 1,568 rows   REMOVED
-   ```
+Raw sample:
+```
+Id                  SAP_Customer_Master_ID__c   Name
+001UH00000tHM7hYAG  9201520                     INTERNATIONAL REFRESHMENTS INDIA PVT LTD
+001UH00000t1rSPYAY  9201510                     GFR MBH
+001UH00000sslakYAA  9201506                     DISTRIBUIDORA CHEMSOL DE COSTA RICA
+```
 
-**Result: a clean lookup of `SAP Customer ID → X1` (69,724 valid managers).**
+**A3.1 — Normalize column `Id`** (trim only; case-sensitive). This is the key
+that matches `AccountId` from A2.
 
----
+**A3.2 — Normalize column `SAP_Customer_Master_ID__c`.** Operation: trim → drop a
+trailing `.0` → strip leading zeros, so it matches the SAP side's format.
+Illustrative (the current file is already clean, so this is defensive):
+```
+0009201520   →   9201520
+9201520.0    →   9201520
+```
+This becomes the working column `sap_id`.
 
-## Step A5 — Join the chain and read off X1
+**A3.3 — Deduplicate** to one row per `Id`.
 
-Join the four cleaned tables in order. Here are **4 real Chemille users** traced
-all the way through to their X1 manager:
-
-| Chemille email (from Chemille User file) | Company | SFDC AccountId | SAP Customer ID | **X1 manager** |
-|---|---|---|---|---|
-| `a.beer@biesterfeld.com` | Biesterfeld | `0016S00003ME3CnQAL` | `1805083` | **MERAL SEN** |
-| `a.dourado@biesterfeld.com` | Biesterfeld | `0016S00003D2bncQAB` | `1801011` | **JOSE GONZALEZ** |
-| `a.fiorini@eltekgroup.it` | ELTEK spa | `001i000000Zv4gAAAR` | `1052267` | **EDMUNDO CAVALIERE** |
-| `a.kulinska@biesterfeld.com.pl` | Biesterfeld Polska | `0016S00003ME1NTQA1` | `1802480` | **ANNA BURSAKOVA** |
-
-> Note how the two `biesterfeld.com` users map to **different** AccountIds and
-> therefore **different** managers — Biesterfeld is a large distributor with
-> several account managers. This becomes important in Part B.
-
-**Result of Part A: 783 Chemille users now have a confirmed X1 manager.**
-These are the **Phase-1 labels** (also called the "training data").
-The remaining **4,071** external users did NOT match a Salesforce contact by
-exact email, so they have no X1 yet.
+> **Output of A3: a clean lookup table `AccountId → sap_id` (+ company `Name`).**
 
 ---
 
-# PART B — ENRICHMENT (Phase 1b): getting 727 more labels
+## STEP A4 — Clean the **SAP Data file** + Data-Quality Control #2
 
-**The problem with the 4,071:** their *exact email* is not in the SFDC Contacts
-file, so Part A's Join 1 fails for them.
+**File:** `SAP-Data.csv` · **Start: 82,969 rows.** Columns used:
+`SAP Customer ID`, `X1`.
 
-**The new idea:** an exact person may be missing, but a **colleague at the same
-company** is often present in the SFDC Contacts file. Colleagues share the same
-**email domain** (e.g. everyone at `@ergotech.it`), and a company's X1 manager is
-the same for the whole company. So we match on **email domain** (company-level)
-instead of exact email (person-level).
+Raw sample (note row 2 is a status, not a person):
+```
+SAP Customer ID   X1
+2806507           MARCO SECCHI
+2808282           TRANSFERRED TO US CHANNEL PARTNER
+2808435           RICARDO DELGADO
+```
 
-## Step B1 — Build an "email-domain → X1" directory
+**A4.1 — Normalize column `SAP Customer ID`** (same trim / drop `.0` / strip
+leading zeros) → working column `sap_id`. This matches A3's `sap_id`.
 
-We build a reference table using **three files only** here:
-`SFDC-Contact-Data.csv` + `SFDC-Accounts-Data.csv` + `SAP-Data.csv`.
-(The Chemille User file is NOT used to build the directory — it is used later, in
-Step B2, as the thing we look up.)
+**A4.2 — Clean column `X1`** (trim spaces; keep the original capitalization of
+the name).
 
-For **every** contact in the SFDC Contacts file:
-1. Take the contact's **email domain** (text after `@`).
-2. Follow that contact's `AccountId` → SFDC Accounts → `SAP Customer ID` → SAP →
-   `X1` (the same chain as Part A).
-3. Group by email domain and pick the **dominant account** for that domain.
+**A4.3 — DATA-QUALITY CONTROL #2: remove invalid / system X1 values.**
+Operation: lowercase a copy of `X1` and drop any row containing
+`not assigned`, `unassigned`, `outdated`, or `transferred`. Real counts removed:
+```
+Not assigned                       → 5,953 rows  REMOVED
+TRANSFERRED TO EU CHANNEL PARTNER  → 3,015 rows  REMOVED
+UNASSIGNED ACCOUNT REP             → 1,877 rows  REMOVED
+TRANSFERRED TO US CHANNEL PARTNER  → 1,568 rows  REMOVED
+(… 13,245 rows removed in total)
+```
 
-We add two safety filters:
-- **Drop generic email domains** (`gmail.com`, `qq.com`, `hotmail.com`, …) —
-  these are personal mailboxes, not companies.
-- **Purity ≥ 60%** — the email domain must point *mostly* to one account.
-  `purity = (contacts on the domain that point to the dominant account) ÷ (all
-  contacts on that domain)`.
+**A4.4 — Deduplicate** to one row per `sap_id`.
 
-Real directory entries built this way:
+> **Output of A4: a clean lookup table `sap_id → X1` (69,724 valid managers).**
 
-| email domain | dominant Salesforce account (Name) | purity | **X1 manager** |
+---
+
+## STEP A5 — Join the four cleaned tables (3 joins)
+
+We now chain the lookups. Worked end-to-end for the Chemille user
+`a.beer@biesterfeld.com`:
+
+| Stage | File / lookup used | Key value | Value obtained |
+|-------|--------------------|-----------|----------------|
+| start | Chemille User file | `email = a.beer@biesterfeld.com` | — |
+| JOIN 1 | A2 table `email → AccountId` | `a.beer@biesterfeld.com` | `AccountId = 0016S00003ME3CnQAL` |
+| JOIN 2 | A3 table `AccountId → sap_id` | `0016S00003ME3CnQAL` | `sap_id = 1805083` |
+| JOIN 3 | A4 table `sap_id → X1` | `1805083` | **`X1 = MERAL SEN`** |
+
+Four more real users traced the same way:
+
+| Chemille email | AccountId (SFDC) | sap_id (SAP) | **X1** |
 |---|---|---|---|
-| `ergotech.it` | ERGOTECH S.R.L. | 93% | MICAELA DI GREGOLI |
-| `snetor.com` | SNETOR FRANCE | 69% | PRANNOY VINCENT ALVA |
-| `us.ennovi.com` | ENNOVI ADVANCED MOBILITY | 83% | BRYAN KESSLER |
-| `itwautochina.com` | SHANGHAI ITW PLASTIC & M | 67% | YANCHAO (ALLAN) JIANG |
-| `jppolymers.in` | J.P. POLYMERS PVT LTD | 60% | PORURI, GOVINDANARAYANA |
+| `a.beer@biesterfeld.com` | `0016S00003ME3CnQAL` | `1805083` | **MERAL SEN** |
+| `a.dourado@biesterfeld.com` | `0016S00003D2bncQAB` | `1801011` | **JOSE GONZALEZ** |
+| `a.fiorini@eltekgroup.it` | `001i000000Zv4gAAAR` | `1052267` | **EDMUNDO CAVALIERE** |
+| `a.kulinska@biesterfeld.com.pl` | `0016S00003ME1NTQA1` | `1802480` | **ANNA BURSAKOVA** |
 
-*(Example of what purity rejects: `gmail.com` would point to thousands of
-different accounts — purity near 0% — so it is excluded.)*
+> Two `biesterfeld.com` users → **different** AccountIds → **different** managers.
+> Biesterfeld is a big distributor with several managers. (Remember this for Part B.)
 
-## Step B2 — Apply the directory to the 4,071 unlabeled Chemille users
+> **Output of PART A: 783 Chemille users now have a confirmed X1 = the Phase-1 labels.**
+> The other **4,071** external users failed JOIN 1 (their exact email is not in
+> the SFDC Contacts file) → no X1 yet.
 
-**File looked up:** `Chemille-User-Data.csv` (only the 4,071 still-unlabeled).
-For each, take their **email domain** and look it up in the directory from B1.
+---
 
-Real examples — unlabeled Chemille users that received a borrowed X1 (these are
-part of the 727):
+# PART B — ENRICHMENT / Phase 1b (+727 labels): match by EMAIL DOMAIN
 
-| Chemille email (unlabeled) | email domain | **borrowed X1 manager** |
-|---|---|---|
-| `a.olmi@ergotech.it` | `ergotech.it` | MICAELA DI GREGOLI |
-| `a.yasser@snetor.com` | `snetor.com` | PRANNOY VINCENT ALVA |
-| `aaron.blancas@us.ennovi.com` | `us.ennovi.com` | BRYAN KESSLER |
-| `aaronzhang@itwautochina.com` | `itwautochina.com` | YANCHAO (ALLAN) JIANG |
-| `aayush.jain@jppolymers.in` | `jppolymers.in` | PORURI, GOVINDANARAYANA |
+**Why Part A missed 4,071 users:** their *exact email* is not in the SFDC Contacts
+file. **New idea:** a **colleague at the same company** is often in the SFDC
+Contacts file, and colleagues share an **email domain** (e.g. everyone at
+`@ergotech.it`). A company's X1 is the same for the whole company → so match on
+**email domain** (company-level) instead of exact email (person-level).
 
-**Result of Part B: 727 additional Chemille users get an X1 manager.**
+The directory in B1 is built from **3 files**: `SFDC-Contact-Data.csv` +
+`SFDC-Accounts-Data.csv` + `SAP-Data.csv`. The **Chemille User file is used only
+in B2** (the users we look up).
 
-## Step B3 — Validate the method using the 783 known labels
+---
 
-We cannot directly check the 727 (we have no "true answer" for them). So we test
-the **same directory** on the 783 Phase-1 users, whose true X1 we already know:
+## STEP B1 — Build the `email_domain → X1` directory
 
+**B1.1 — Start from the cleaned SFDC Contacts** (`email`, `AccountId` from A2,
+before the dedup so we keep all colleagues).
+
+**B1.2 — Add `email_domain`** = text after `@` of each contact's `email`.
+
+**B1.3 — Group by `email_domain`** and, for each domain, compute:
+- number of contacts on that domain,
+- number of **distinct** `AccountId`s,
+- the **dominant** `AccountId` (most frequent),
+- **purity** = (contacts on the dominant account) ÷ (all contacts on the domain).
+
+### Worked purity example — email domain `ergotech.it`
+All SFDC Contacts at this email domain (column `email`, column `AccountId`):
+```
+email                          AccountId
+a.serrajotto@ergotech.it       001i000000kUO0fAAG
+claudia.molinatti@ergotech.it  001i000000kUO0fAAG
+d.bariona@ergotech.it          001i000000kUO0fAAG
+f.cobetto@ergotech.it          001i000000kUO0fAAG
+f.fabbri@ergotech.it           001i000000kUO0fAAG   (x3)
+g.gaida@ergotech.it            001i000000kUO0fAAG
+l.perrucchione@ergotech.it     001i000000kUO0fAAG
+m.colle@ergotech.it            001i000000kUO0fAAG
+m.dini@ergotech.it             001i000000kUO0fAAG   (x3)
+s.agosti@ergotech.it           001i000000kUO0fAAG
+s.bacchini@ergotech.it         001i000000Zv5NwAAJ   ← the 1 odd one
+```
+- distinct accounts = **2**
+- dominant = `001i000000kUO0fAAG` → appears **14 of 15** rows
+- **purity = 14 / 15 = 93%**
+
+**B1.4 — Keep only trustworthy domains:**
+- **Drop generic email domains** (`gmail.com`, `qq.com`, `hotmail.com`, …) — personal mailboxes, not companies.
+- **Keep purity ≥ 60%** — domain must point mostly to one account.
+
+**B1.5 — Walk the dominant account to X1** (reusing A3 and A4 lookups):
+```
+dominant AccountId 001i000000kUO0fAAG
+   → SFDC Accounts file: Name = ERGOTECH S.R.L., sap_id = 1075004
+   → SAP Data file:      X1   = MICAELA DI GREGOLI
+```
+So the directory entry is:
+```
+ergotech.it  →  X1 = MICAELA DI GREGOLI   (purity 93%, account ERGOTECH S.R.L.)
+```
+
+Five real directory entries built this way:
+
+| email_domain | dominant account `Name` | purity | sap_id | **X1** |
+|---|---|---|---|---|
+| `ergotech.it` | ERGOTECH S.R.L. | 93% | 1075004 | MICAELA DI GREGOLI |
+| `snetor.com` | SNETOR FRANCE | 69% | — | PRANNOY VINCENT ALVA |
+| `us.ennovi.com` | ENNOVI ADVANCED MOBILITY | 83% | — | BRYAN KESSLER |
+| `itwautochina.com` | SHANGHAI ITW PLASTIC & M | 67% | — | YANCHAO (ALLAN) JIANG |
+| `jppolymers.in` | J.P. POLYMERS PVT LTD | 60% | — | PORURI, GOVINDANARAYANA |
+
+> **Output of B1: a big directory `email_domain → X1` (~30,878 clean domains).**
+
+---
+
+## STEP B2 — Apply the directory to the 4,071 unlabeled Chemille users
+
+**File looked up:** `Chemille-User-Data.csv` (the 4,071 still without an X1).
+
+**B2.1 — For each unlabeled user, take their `email_domain`** (from A1.3).
+**B2.2 — Look it up in the B1 directory.** If found → borrow that X1.
+
+Real unlabeled users that received a borrowed X1 (part of the 727):
+
+| Chemille email (unlabeled) | email_domain | directory match | **borrowed X1** |
+|---|---|---|---|
+| `a.olmi@ergotech.it` | `ergotech.it` | ERGOTECH S.R.L. (93%) | MICAELA DI GREGOLI |
+| `a.yasser@snetor.com` | `snetor.com` | SNETOR FRANCE (69%) | PRANNOY VINCENT ALVA |
+| `aaron.blancas@us.ennovi.com` | `us.ennovi.com` | ENNOVI (83%) | BRYAN KESSLER |
+| `aaronzhang@itwautochina.com` | `itwautochina.com` | SHANGHAI ITW (67%) | YANCHAO (ALLAN) JIANG |
+| `aayush.jain@jppolymers.in` | `jppolymers.in` | J.P. POLYMERS (60%) | PORURI, GOVINDANARAYANA |
+
+> Notice `a.olmi@ergotech.it` was NOT in the SFDC Contacts file as a person — but
+> 15 of his colleagues were, so his company (`ergotech.it`) is in the directory
+> and he inherits ERGOTECH's manager.
+
+> **Output of B2: 727 additional Chemille users get an X1.**
+
+---
+
+## STEP B3 — Validate the method on the 783 known labels
+
+We have no "true answer" for the 727, so we test the **same directory** on the
+783 Phase-1 users (whose true X1 we already know):
 ```
 For each of the 783 known users:
-   ignore their known answer
-   look up their email domain in the directory
-   compare the borrowed X1 to their TRUE X1
-Result: 96.4% match  (on the 385 of them that had a directory entry)
+    hide their known X1
+    look up their email_domain in the B1 directory → get a "borrowed" X1
+    compare borrowed X1  vs  their TRUE X1
+Result: 96.4% match  (on the 385 of the 783 that had a directory entry)
 ```
-
-Because the 727 go through the identical directory, we expect ~96% reliability —
-so these are treated as **recovered labels**, not ML guesses.
+Because the 727 pass through the identical directory, we expect ~96% accuracy →
+they are treated as **recovered labels**, not ML guesses.
 
 ---
 
-# Summary
+# OVERALL SUMMARY
 
-| | Phase 1 (Part A) | Enrichment (Part B) |
+| | PART A — Phase 1 | PART B — Enrichment |
 |---|---|---|
-| Match key | **exact email** (person-level) | **email domain** (company-level) |
-| Files used to find the manager | SFDC Contacts + SFDC Accounts + SAP Data | SFDC Contacts + SFDC Accounts + SAP Data |
-| File supplying the users to label | Chemille User file | Chemille User file (the 4,071 left over) |
+| Match key | **exact email** (person) | **email domain** (company) |
+| Files to find the manager | SFDC Contacts → SFDC Accounts → SAP Data | SFDC Contacts → SFDC Accounts → SAP Data |
+| File supplying users to label | Chemille User file (all 4,854) | Chemille User file (the 4,071 left over) |
+| Quality control | DQ#1 (ambiguous email), DQ#2 (invalid X1) | generic-domain filter + purity ≥ 60% |
 | New labels | **783** | **+727** |
-| Quality | exact / deterministic | 96.4% validated |
-| Combined | | **≈ 1,510 confirmed X1 labels** |
+| Validation | deterministic (exact) | **96.4%** vs the 783 |
+| **Combined total** | | **≈ 1,510 confirmed X1 labels** |
 
-**One-line summary:** Phase 1 matches each Chemille user to a Salesforce person
-by exact email and follows the chain to SAP for the X1 manager (783 labels). The
-enrichment then rescues users whose exact email is missing by matching on their
-**email domain** to a colleague's company in Salesforce (+727 labels, 96%
-validated), nearly doubling the confirmed mappings.
+**In one paragraph:** Phase 1 cleans the four files, matches each Chemille user to
+a Salesforce **person** by *exact email* (`Chemille Email → SFDC Contact.Email`),
+then follows `SFDC Contact.AccountId → SFDC Account.Id → SFDC Account.SAP id →
+SAP.[SAP Customer ID] → SAP.X1`, removing ambiguous emails (DQ#1) and invalid
+managers (DQ#2) — yielding **783** confirmed labels. The enrichment then rescues
+users whose exact email is missing by matching on their **email domain** to a
+colleague's company already in Salesforce (filtered to clean, single-company
+domains), borrowing that company's manager — adding **727** labels at **96.4%**
+validated accuracy, for **≈1,510** total.

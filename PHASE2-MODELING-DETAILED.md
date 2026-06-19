@@ -78,6 +78,174 @@ parker.com      → TIMOTHY BUTURLA  (confidence = share of parker labeled users
 **Strength / weakness:** very precise where it fires, but only covers domains that
 appeared among the 783 labels → limited coverage.
 
+### 3.1 How "most common X1", "share", and "confidence" are calculated
+
+In code (`fit_domain_lookup`) it is three lines:
+
+```python
+g     = train.groupby("email_domain")["x1"]
+top   = g.agg(lambda s: s.value_counts().idxmax())            # most common X1
+share = g.agg(lambda s: s.value_counts(normalize=True).max()) # vote share = confidence
+```
+
+For one domain:
+
+- **most common X1** = the manager that appears most often among that domain's
+  labeled users (`value_counts().idxmax()` — pandas counts each manager, then picks
+  the one with the highest count).
+- **share = confidence** = that top manager's count divided by the total number of
+  labeled users at the domain:
+
+```
+confidence = (labeled users at the domain whose X1 = the most common X1)
+             ----------------------------------------------------------
+             (total labeled users at the domain)
+```
+
+So confidence is literally "what fraction of this domain's known users agree on the
+same manager." 1.0 means perfect agreement; 0.5 means the domain is split.
+
+#### Example A — clean domain (one manager) → confidence 1.0
+
+Among the 783 labels, suppose 5 users have `@parker.com`:
+
+| labeled user | true X1 |
+|---|---|
+| 9001093@parker.com | TIMOTHY BUTURLA |
+| j.smith@parker.com | TIMOTHY BUTURLA |
+| k.tanaka@parker.com | TIMOTHY BUTURLA |
+| m.lee@parker.com | TIMOTHY BUTURLA |
+| r.gomez@parker.com | TIMOTHY BUTURLA |
+
+`value_counts()` → `{TIMOTHY BUTURLA: 5}`
+- most common X1 = **TIMOTHY BUTURLA**
+- share = 5 / 5 = **1.0** → confidence **1.0**
+
+Result stored: `parker.com → (TIMOTHY BUTURLA, 1.0)`. Any unlabeled `@parker.com`
+user gets TIMOTHY BUTURLA at confidence 1.0. Because 1.0 ≥ the 0.80 gate, the tiered
+model accepts this via `domain_lookup` (matches the real row in §9).
+
+#### Example B — split domain (several managers) → low confidence, gated out
+
+Suppose 10 labeled users have `@biesterfeld.com`:
+
+| X1 | count |
+|---|---|
+| ANNA BURSAKOVA | 4 |
+| JOSE GONZALEZ | 3 |
+| MARK FISCHER | 2 |
+| LISA WONG | 1 |
+| **total** | **10** |
+
+`value_counts()` is ordered `[ANNA BURSAKOVA:4, JOSE GONZALEZ:3, …]`
+- most common X1 = **ANNA BURSAKOVA** (highest count, 4)
+- share = 4 / 10 = **0.40** → confidence **0.40**
+
+Result stored: `biesterfeld.com → (ANNA BURSAKOVA, 0.40)`. The rule still *has* an
+answer, but only 40% of Biesterfeld's known users actually map to it — unreliable.
+Because 0.40 < 0.80, the **tiered model does NOT use domain lookup here**; it falls
+through to similarity (Approach 2). That is exactly why the real Biesterfeld rows in
+§9 show `method = similarity` and even disagree with each other.
+
+#### Example C — moderate majority → fires alone, but gated out of the tiered model
+
+Suppose 3 labeled users have `@acme.com`: MANAGER_A ×2, MANAGER_B ×1.
+- most common X1 = **MANAGER_A**
+- share = 2 / 3 = **0.667** → confidence **0.667**
+
+Approach 1 on its own would return MANAGER_A at 0.667. But 0.667 < 0.80, so the
+**tiered** model again prefers similarity. (0.80 was chosen precisely to reject
+"2-out-of-3"-style weak majorities.)
+
+#### Example D — domain seen only once → confidence 1.0 (a caveat)
+
+If a domain appears for just **one** labeled user:
+- most common X1 = that single user's manager
+- share = 1 / 1 = **1.0** → confidence **1.0**
+
+The math is correct, but the "1.0" rests on a single example, so it is *confident by
+construction*, not by weight of evidence. Many small domains land here, which is part
+of why high-confidence domain hits still aren't perfect on held-out data.
+
+#### Quick reference
+
+| Domain | counts | most common X1 | share = confidence | tiered uses it? (gate 0.80) |
+|---|---|---|---:|---|
+| parker.com | A:5 | A | 5/5 = **1.00** | ✅ domain_lookup |
+| snetor.com | P:6 | P | 6/6 = **1.00** | ✅ domain_lookup |
+| acme.com | A:2, B:1 | A | 2/3 = **0.67** | ❌ → similarity |
+| biesterfeld.com | 4/3/2/1 | A | 4/10 = **0.40** | ❌ → similarity |
+| onelabel.com | A:1 | A | 1/1 = **1.00** | ✅ (but 1 example only) |
+
+> Tie note: if two managers tie for the top count, `value_counts()` keeps them in
+> first-seen order and `idxmax()` returns the first — so ties are broken arbitrarily.
+> Such domains have share ≤ 0.50 anyway, so the 0.80 gate discards them in the tiered
+> model regardless.
+
+### 3.2 The SAME calculation on the REAL 783 labeled users
+
+The examples above used round "suppose" numbers. Here are the actual figures
+computed from `chemille_user_x1_training_dataset.csv` (the 783 labels), grouped by
+`email_domain`.
+
+**Real CLEAN domains — every labeled user agrees → confidence 1.0**
+
+| email_domain | # labeled users | X1 counts | most common X1 | share = confidence |
+|---|---:|---|---|---:|
+| `formerra.com` | 52 | AMINE OURABAH ×52 | AMINE OURABAH | 52/52 = **1.00** |
+| `omya.com` | 13 | MARTINA MENZEL ×13 | MARTINA MENZEL | 13/13 = **1.00** |
+| `resinex.com` | 11 | KATARZYNA BEDNARSKA ×11 | KATARZYNA BEDNARSKA | 11/11 = **1.00** |
+| `entecresins.com` | 6 | GILBERT MUZQUIZ ×6 | GILBERT MUZQUIZ | 6/6 = **1.00** |
+
+e.g. all 52 `@formerra.com` labeled users have the same manager, so
+`value_counts() = {AMINE OURABAH: 52}` → most common = AMINE OURABAH, share =
+52/52 = **1.0**. Any unlabeled `@formerra.com` user is assigned AMINE OURABAH at
+confidence 1.0, and (1.0 ≥ 0.80) the tiered model accepts it via `domain_lookup`.
+
+**Real SPLIT domains — labeled users disagree → low confidence → gated out**
+
+| email_domain | # labeled users | X1 counts (real) | most common X1 | share = confidence |
+|---|---:|---|---|---:|
+| `kdfeddersen.com` | 32 | CHRIS SASSMANNSHAUSEN ×18, DESPINA THEODOROU ×14 | CHRIS SASSMANNSHAUSEN | 18/32 = **0.56** |
+| `biesterfeld.com` | 30 | PRANNOY VINCENT ALVA ×10, ANNA BURSAKOVA ×9, MERAL SEN ×7, JOSE GONZALEZ ×4 | PRANNOY VINCENT ALVA | 10/30 = **0.33** |
+| `inabata.com` | 16 | OHKE HAJIME ×5, QIANLI XIE ×5, … (7 managers) | OHKE, HAJIME | 5/16 = **0.31** |
+
+e.g. real `@biesterfeld.com` has **four** managers across its 30 labeled users;
+the top one (PRANNOY) covers only 10/30 = **0.33**. Because 0.33 < 0.80, the
+tiered model does **not** use domain lookup for Biesterfeld — it falls through to
+similarity (Approach 2). This is the real reason the Biesterfeld rows in §9 show
+`method = similarity` and disagree with one another.
+
+**Real MODERATE majority — "2 of 3" → 0.67 → still gated out**
+
+| email_domain | X1 counts | most common X1 | share |
+|---|---|---|---:|
+| `hangjiang.com` | CHARLEY HU ×2, CANWEN (BARRY) PENG ×1 | CHARLEY HU | 2/3 = **0.67** |
+| `sojitz.com` | MEKHIN ANUWAT ×2, QIANLI XIE ×1 | MEKHIN, ANUWAT | 2/3 = **0.67** |
+
+Approach 1 alone would answer CHARLEY HU at 0.67, but 0.67 < 0.80 → the tiered
+model prefers similarity.
+
+**Real SINGLE-user domains — confidence 1.0 by construction (the caveat)**
+
+`3fllc.com → TRICIA COOKE MILLER`, `abbott.com → ANTHONY VERROCCHI`,
+`aceway.com.hk → GUOBAO SUN (ASUN)` — each has just **one** labeled user, so share =
+1/1 = **1.0**. The number is real but rests on a single example.
+
+**Why this matters — the real shape of the 783 domains**
+
+| | count |
+|---|---:|
+| distinct email domains among the 783 | **400** |
+| domains with ≥ 2 labeled users | 105 |
+| domains with exactly 1 labeled user | **295 (74%)** |
+
+So **74% of the domains the rule learns are single-example** (confidence 1.0 "by
+construction"), and only a minority have enough users to give a *weighty* vote.
+That is precisely why Approach 1 is precise where it has evidence but limited
+overall — and why the bigger **enrichment directory** (built from 145k SFDC
+contacts, not just 783 users) is the stronger sibling for domain-based mapping.
+
 ---
 
 ## 4. Approach 2 — Nearest-neighbour similarity (char TF-IDF)
@@ -95,6 +263,79 @@ to all 783 labeled vectors, take the closest one, return its X1.
 
 **Strength / weakness:** 100% coverage (always has a nearest neighbour) but lower
 precision than the domain rule; handles the long tail.
+
+### 4.1 What the method actually does, step by step
+
+**Step 1 — build the `text` field** (§2.3) for every user:
+`text = company + " " + email_domain_name + " " + country` (all lowercased).
+Examples:
+```
+biesterfeld user  →  "biesterfeld biesterfeld germany"
+formerra user     →  "formerra formerra canada"
+```
+
+**Step 2 — turn text into character n-grams.** `char_wb` means "characters within
+word boundaries"; `ngram_range=(2,5)` means every run of 2 to 5 characters.
+For the word `omya` the 2–3 character grams are:
+```
+' o', 'om', 'my', 'ya', 'a ', ' om', 'omy', 'mya', 'ya '
+```
+Using *characters* (not whole words) is what makes the match tolerant of spelling
+and suffix differences — `Acme Inc` and `ACME Incorporated` share many of the same
+character grams (`acm`, `cme`, …) even though the words aren't identical.
+
+**Step 3 — TF-IDF weighting.** Each text becomes a numeric vector over all the
+character grams seen in the 783 labeled texts. Common grams are down-weighted,
+distinctive ones up-weighted, so rare company-specific grams carry more signal.
+
+**Step 4 — cosine similarity.** For an unlabeled user, compare their vector to all
+783 labeled vectors. **Cosine similarity** ranges 0 (no shared grams) → 1
+(identical text). Take the **single most similar** labeled user and **borrow their
+X1**. The similarity value **is** the confidence.
+
+### 4.2 Real nearest-neighbour examples (from the data)
+
+**Example 1 — exact text match → similarity 1.00 (strong, auto-accept)**
+```
+UNLABELED : a.abbasi@biesterfeld.com
+   text    : "biesterfeld biesterfeld germany"
+   nearest : "biesterfeld biesterfeld germany"   (m.rathke@biesterfeld.com)
+   cosine  : 1.000   → borrow X1 = ANNA BURSAKOVA
+```
+The unlabeled user's text is *identical* to a labeled user's text, so similarity =
+1.0. (Note: Biesterfeld is a multi-manager company, so even at 1.0 the borrowed
+manager may not be the *right* one — see the caveat in §9.)
+
+**Example 2 — fuzzy match, same company, different country office → similarity 0.50**
+```
+UNLABELED : development@kohyei.in
+   text    : "polyhose kohyei kohyei india"
+   nearest : "kohyei trading co.,ltd kycztj japan"   (yuji_kishi@kycztj.co.jp)
+   cosine  : 0.498   → borrow X1 = OHKE, HAJIME
+```
+No labeled `@kohyei.in` user exists, but the character grams of `kohyei` overlap, so
+the nearest neighbour is the Kohyei record in Japan. The match is *partial* (0.50)
+because only the `kohyei` part agrees — different country and extra words pull it
+down. Confidence 0.50 → borderline → flagged for review.
+
+**Example 3 — spurious look-alike → low similarity (correctly flagged for review)**
+```
+UNLABELED : nicole@form3.com
+   text    : "form3 design form3 canada"
+   nearest : "formerra formerra canada"   (alejandro.hernandez@formerra.com)
+   cosine  : 0.499   → borrow X1 = AMINE OURABAH
+```
+Here `form3` and `formerra` share the grams `for`, `orm`, `form`, plus both are in
+Canada — so they look similar to the character matcher, but they are **different
+companies**. The model returns a low confidence (0.499), so `needs_review = True`
+and a human catches it. This is exactly why the **confidence threshold** matters:
+weak, possibly-wrong matches surface as low scores instead of silent errors.
+
+> Reading the three together: similarity is **highest when the whole text matches**
+> (Example 1), **medium when only the company name matches** (Example 2), and **low
+> when only a few characters coincidentally overlap** (Example 3). The confidence
+> score tracks that, which is what lets the tiered model auto-accept the strong ones
+> and route the weak ones to a person.
 
 ---
 

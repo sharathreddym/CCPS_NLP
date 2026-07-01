@@ -353,7 +353,71 @@ which of the three branches applies.
 
 ---
 
-## 10. Key takeaways / reusable checklist
+## 10. Related bug — BUG 217962 (Zytel 103HSL BK080) — same root cause, already fixed
+
+- **Title:** Grade Results | Newly added grade being identified as out of scope
+- **Report:** Grade `Zytel® 103HSL BK080` (added early June, shows in Chemille) is marked
+  out-of-scope and not searchable in Chemille; user also noted **missing TDS/PSDS documents**.
+- Priority 4 / Severity 4-Low / Prod.
+
+**Verdict: same class as BUG 217995 and already resolved by the same regenerated data.** It is a
+newly-added grade that was in the out-of-scope master but not yet in the in-scope master (`SPT`).
+
+| List | OLD `outOfScopeData.json` | NEW `outOfScopeData_new.json` |
+|------|:---:|:---:|
+| `grades` (OOS) | ✅ present (→ flagged) | ❌ removed |
+| `gradesExternal` (OOS) | ✅ present (→ flagged) | ❌ removed |
+| `gradesInScope` | ❌ absent | ✅ **added** |
+| `gradesInScopeExternal` | ❌ absent | ✅ **added** |
+
+End-to-end simulation on the new file: **not flagged** for internal or external → resolves
+**in-scope**. It's a known grade (`NUV.GRADE` contains `zytel103hslbk080`); the new in-scope list
+holds both `zytel103hslbk080` and `zytel103hslbkb080`. **No extra change needed** — the same
+`outOfScopeData.json` promotion + redeploy that fixes 217995 covers this too.
+
+### ⚠️ Two symptoms — only one is NER's
+- **"identified as out of scope / not searchable"** → ✅ NER data issue → fixed by regenerated `outOfScopeData.json`.
+- **"missing TDS / PSDS documents"** → ❌ **not** NER. Document availability comes from a separate
+  document-management / catalog pipeline. This fix makes the grade in-scope/searchable but does
+  **not** attach documents — route the TDS/PSDS half to that pipeline's owner.
+
+### 10a. Resolution comment (paste-ready) — BUG 217962
+
+> **Resolution — BUG 217962: Newly added grade "Zytel 103HSL BK080" identified as out-of-scope**
+>
+> This is the same root cause as BUG 217995 (data, not code). The grade `Zytel 103HSL BK080`
+> (normalized `zytel103hslbk080`) was present in the out-of-scope grade lists (`grades`,
+> `gradesExternal`) and absent from the in-scope lists (`gradesInScope`, `gradesInScopeExternal`)
+> in `dependencies/outOfScopeData.json`, because this newly-added grade existed in Snowflake
+> `GST_CURATED.OUT_OF_SCOPE_GRADES` but not yet in the in-scope master (`SPT`), so the
+> de-confliction step never reclassified it → `identify_out_of_scope_items()` flagged it.
+>
+> The Snowflake source has since been corrected (grade now in-scope in `SPT`), and
+> `outOfScopeData.json` was regenerated. Validated: `zytel103hslbk080` removed from the
+> out-of-scope lists and added to the in-scope lists; end-to-end simulation shows it resolves
+> **in-scope** for both internal and external users. No code or additional data change is required
+> beyond the same `outOfScopeData.json` update deployed for BUG 217995.
+>
+> **Scope note:** this resolves the "identified as out-of-scope / not searchable in Chemille"
+> symptom. The separately-noted **missing TDS/PSDS documents** is not an NER issue — document
+> availability comes from the document-management/catalog pipeline and must be addressed there
+> (verify the TDS/PSDS exist for this grade at that source). Recommend tracking the documents
+> portion as its own item if not already covered.
+>
+> **Deployment:** covered by the same rollout as BUG 217995 — promote the regenerated
+> `outOfScopeData.json`, re-register dependencies, redeploy the NER endpoint; then confirm
+> `Zytel 103HSL BK080` returns in-scope on askchemille.com.
+
+### 10b. Standup one-liner — BUG 217962
+
+> **BUG 217962:** Same root cause as 217995 — newly-added grade `Zytel 103HSL BK080` was
+> out-of-scope in the data (in OOS lists, missing from in-scope). Already fixed in the regenerated
+> `outOfScopeData.json` (validated in-scope). The "missing TDS/PSDS" part is a separate
+> document-pipeline issue, not NER. Pending the same redeploy.
+
+---
+
+## 11. Key takeaways / reusable checklist
 
 - **"Grade shown as out-of-scope" is almost always a data issue** in `outOfScopeData.json`
   (grade in the OOS lists and/or missing from the in-scope lists), traceable to Snowflake
